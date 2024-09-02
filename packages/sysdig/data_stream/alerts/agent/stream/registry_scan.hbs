@@ -1,0 +1,65 @@
+{{!-- Started based on https://github.com/elastic/integrations/blob/d5f72523ef4d33b3cef93ce35697cd28acc310e3/packages/o365/data_stream/audit/agent/stream/cel.yml.hbs#L47 --}}
+interval: {{interval}}
+
+resource.url: {{url}}
+{{#if resource_rate_limit_limit}}
+resource.rate_limit.limit: {{resource_rate_limit_limit}}
+{{/if}}
+{{#if resource_rate_limit_burst}}
+resource.rate_limit.burst: {{resource_rate_limit_burst}}
+{{/if}}
+
+{{#if enable_request_tracer}}
+resource.tracer.filename: "../../logs/cel/registry-scan-request-trace-*.ndjson"
+resource.tracer.maxbackups: 10
+resource.tracer.maxsize: 5
+{{/if}}
+
+state:
+  want_more: false
+  base:
+    api_token: "{{api_token}}"
+    results_endpoint: "{{scan_results_endpoint}}"
+
+redact:
+  fields:
+    - base.api_token
+
+program: |
+  "get_request(state.url+"?cursor="+state.cursor.next).with({
+    "Header":{
+      "Authorization": ["Bearer "+state.base.api_token]
+    }
+  }).do_request().as(resp, bytes(resp.Body).decode_json()).as(body, {
+    "events": has(body.data) ? body.data.map(e, true,
+      [[e.with({
+        "result": get_request(state.base.results_endpoint+e.resultId).with({"Header":{
+          "Authorization": ["Bearer "+state.base.api_token]
+        }}).do_request().as(resp, bytes(resp.Body).decode_json()).as(body, {
+          "metadata": has(body.result) && has(body.result.metadata) ? body.result.metadata : [],
+          "vulnerabilities:": has(body.result) && has(body.result.packages) ? body.result.packages : [],
+        })
+      })]]
+    ).flatten().drop_empty() : [],
+    "cursor": {
+      "next": has(body.page) && has(body.page.next) ? body.page.next : ""
+    },
+    "want_more": has(body.data) && has(body.page) && has(body.page.next)
+  })
+
+{{#if tags}}
+tags:
+{{#if preserve_original_event}}
+  - preserve_original_event
+{{/if}}
+{{#each tags as |tag|}}
+  - {{tag}}
+{{/each}}
+{{/if}}
+{{#contains "forwarded" tags}}
+publisher_pipeline.disable_host: true
+{{/contains}}
+{{#if processors}}
+processors:
+{{processors}}
+{{/if}}
